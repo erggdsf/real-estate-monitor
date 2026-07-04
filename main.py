@@ -553,8 +553,7 @@ class PushNotifier:
 
 # ============ 主程序 ============
 def main():
-    """主入口 - 带错误处理"""
-    try:
+    """主入口"""
     start_time = datetime.datetime.now()
     log("INFO", "=" * 40)
     log("INFO", "房产监控日报系统启动(云端版)")
