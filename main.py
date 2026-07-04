@@ -46,6 +46,11 @@ CONFIG = {
 
 # ============ 数据库 ============
 def init_db():
+    """初始化数据库 - 确保目录存在"""
+    import os
+    db_dir = os.path.dirname(CONFIG["db_path"])
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
     """初始化数据库"""
     conn = sqlite3.connect(CONFIG["db_path"])
     cursor = conn.cursor()
@@ -548,6 +553,8 @@ class PushNotifier:
 
 # ============ 主程序 ============
 def main():
+    """主入口 - 带错误处理"""
+    try:
     start_time = datetime.datetime.now()
     log("INFO", "=" * 40)
     log("INFO", "房产监控日报系统启动(云端版)")
@@ -579,4 +586,10 @@ def main():
     log("INFO", "=" * 40)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[FATAL] 程序异常: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
