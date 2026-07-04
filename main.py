@@ -517,11 +517,9 @@ class PushNotifier:
         today = datetime.datetime.now().strftime("%Y年%m月%d日")
         videos, policies = DataStore.get_today_data()
         
-        lines = [f"# 房产监控日报 ({today})
-"]
+        lines = [f"# 房产监控日报 ({today})\n"]
         
-        lines.append("## 今日房产热点
-")
+        lines.append("## 今日房产热点\n")
         if videos:
             for v in videos[:10]:
                 platform, author, title, url, likes = v
@@ -529,11 +527,9 @@ class PushNotifier:
                 lines.append(f"[查看详情]({url})")
                 lines.append("")
         else:
-            lines.append("> 今日暂无新内容
-")
+            lines.append("> 今日暂无新内容\n")
         
-        lines.append("## 政策动态
-")
+        lines.append("## 政策动态\n")
         if policies:
             for p in policies[:8]:
                 source, title, url = p
@@ -541,14 +537,12 @@ class PushNotifier:
                 lines.append(f"[查看详情]({url})")
                 lines.append("")
         else:
-            lines.append("> 今日暂无新政策
-")
+            lines.append("> 今日暂无新政策\n")
         
         lines.append("---")
         lines.append("*自动发送*")
         
-        message = "
-".join(lines)
+        message = "\n".join(lines)
         return PushNotifier.send(message, f"房产监控日报 {today}")
 
 # ============ 主程序 ============
