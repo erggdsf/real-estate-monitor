@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-房产短视频监控日报系统 - 云端全自动版
-运行环境: GitHub Actions (免费)
-特点:
-  1. 无需本地电脑开机
-  2. GitHub服务器每天定时执行
-  3. 100%安全,无风控
-  4. 完全免费
+房产短视频监控日报系统 - 房产大V版
+功能：监控指定房产大V账号的最新视频（抖音/快手/视频号）
+      采集各平台房产相关政策
+      每日定点推送到手机微信
 """
 
 import os
@@ -34,23 +31,45 @@ CONFIG = {
     "wecom_webhook": os.getenv("WECOM_WEBHOOK", ""),
     "serverchan_key": os.getenv("SERVERCHAN_KEY", ""),
     
-    # 数据存储路径(GitHub Actions中持久化)
+    # 数据存储路径
     "db_path": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db"),
     
-    # 安全请求间隔(秒)
+    # 请求间隔（秒）
     "request_delay": 5,
     
     # 每日最大请求数
-    "max_requests_per_day": 30,
+    "max_requests_per_day": 50,
+    
+    # 优质视频判定阈值
+    "quality_threshold": {
+        "min_likes": 1000,
+        "min_comments": 100,
+    },
+    
+    # 监控的房产大V账号列表
+    # 格式: {"platform": "抖音/快手/视频号", "name": "显示名称", "user_id": "用户ID"}
+    "accounts": [
+        # 抖音房产大V示例（请替换为真实账号ID）
+        {"platform": "抖音", "name": "房产大V-示例1", "user_id": ""},
+        {"platform": "抖音", "name": "房产大V-示例2", "user_id": ""},
+        
+        # 快手房产大V示例（请替换为真实账号ID）
+        {"platform": "快手", "name": "房产大V-示例3", "user_id": ""},
+        
+        # 视频号房产大V示例（请替换为真实账号ID）
+        {"platform": "视频号", "name": "房产大V-示例4", "user_id": ""},
+    ],
+    
+    # 政策公告页面监控
+    "policy_sources": [
+        {"name": "抖音创作者中心公告", "url": "https://creator.douyin.com/announcement"},
+        {"name": "快手创作者服务中心", "url": "https://cp.kuaishou.com/article"},
+        {"name": "微信视频号助手公告", "url": "https://channels.weixin.qq.com/announcement"},
+    ],
 }
 
 # ============ 数据库 ============
 def init_db():
-    """初始化数据库 - 确保目录存在"""
-    import os
-    db_dir = os.path.dirname(CONFIG["db_path"])
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
     """初始化数据库"""
     conn = sqlite3.connect(CONFIG["db_path"])
     cursor = conn.cursor()
@@ -62,8 +81,12 @@ def init_db():
             author TEXT,
             title TEXT,
             url TEXT,
-            likes TEXT,
-            collected_at TEXT
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            plays INTEGER DEFAULT 0,
+            publish_time TEXT,
+            collected_at TEXT,
+            is_quality INTEGER DEFAULT 0
         )
     ''')
     
@@ -73,6 +96,7 @@ def init_db():
             source TEXT,
             title TEXT,
             url TEXT,
+            summary TEXT,
             collected_at TEXT
         )
     ''')
@@ -159,29 +183,35 @@ class SafeRequest:
                     time.sleep(10)
         return None
 
-# ============ 视频采集 - 100%安全数据源 ============
+# ============ 视频采集 - 房产大V版 ============
 class VideoCollector:
     """
-    使用经过验证的100%可用数据源
-    数据源1: 百度热搜房产榜 (公开页面)
-    数据源2: 微博热搜房产话题 (公开页面)
+    通过RSSHub采集房产大V账号视频
+    安全、免费、无封号风险
     """
+    
+    # RSSHub实例列表（多个备用）
+    RSSHUB_INSTANCES = [
+        "https://rsshub.app",
+        "https://rsshub.rssforever.com",
+        "https://rss.shab.fun",
+    ]
     
     @staticmethod
     def collect_all():
+        """采集所有配置的账号"""
         all_videos = []
         
-        # 数据源1: 百度热搜
-        log("INFO", "[数据源1] 采集百度热搜房产内容...")
-        videos = VideoCollector.collect_baidu_hot()
-        all_videos.extend(videos)
-        log("INFO", f"百度热搜: {len(videos)} 条")
-        
-        # 数据源2: 微博热搜
-        log("INFO", "[数据源2] 采集微博房产话题...")
-        videos = VideoCollector.collect_weibo_hot()
-        all_videos.extend(videos)
-        log("INFO", f"微博热搜: {len(videos)} 条")
+        for account in CONFIG["accounts"]:
+            if not account.get("user_id"):
+                log("INFO", f"跳过未配置账号: {account['name']}")
+                continue
+            
+            log("INFO", f"采集[{account['platform']}] {account['name']}...")
+            videos = VideoCollector.collect_from_rsshub(account)
+            all_videos.extend(videos)
+            log("INFO", f"{account['name']}: {len(videos)} 条")
+            time.sleep(3)
         
         # 去重
         seen = set()
@@ -194,199 +224,147 @@ class VideoCollector:
         return unique
     
     @staticmethod
-    def collect_baidu_hot():
-        """
-        采集百度热搜榜中的房产相关内容
-        数据源: https://top.baidu.com/board?tab=realtime
-        状态: 公开页面,无反爬,100%可用
-        """
+    def collect_from_rsshub(account):
+        """通过RSSHub采集单个账号"""
         videos = []
         
-        try:
-            resp = SafeRequest.get("https://top.baidu.com/board?tab=realtime")
-            if not resp:
-                return videos
-            
-            text = resp.text
-            import re
-            pattern = r'"word":"([^"]+)".*?"url":"([^"]+)"'
-            matches = re.findall(pattern, text)
-            
-            keywords = ["房", "楼", "地产", "楼盘", "房价", "买房", "卖房", "租房"]
-            
-            for title, url in matches[:30]:
-                if any(kw in title for kw in keywords):
-                    video_id = hashlib.md5(("baidu" + url + title).encode()).hexdigest()[:16]
-                    videos.append({
-                        "id": video_id,
-                        "platform": "百度热搜",
-                        "author": "热搜",
-                        "title": title[:100],
-                        "url": url if url.startswith("http") else "https://www.baidu.com" + url,
-                        "likes": "热搜",
-                        "collected_at": datetime.datetime.now().isoformat(),
-                    })
+        # 构建RSSHub URL
+        if account["platform"] == "抖音":
+            rss_path = f"/douyin/user/{account['user_id']}"
+        elif account["platform"] == "快手":
+            rss_path = f"/kuaishou/user/{account['user_id']}"
+        elif account["platform"] == "视频号":
+            # 视频号可能需要其他方式
+            log("WARN", f"视频号暂不支持RSSHub采集: {account['name']}")
+            return videos
+        else:
+            return videos
         
-        except Exception as e:
-            log("ERROR", f"百度热搜采集失败: {e}")
+        # 尝试多个RSSHub实例
+        for instance in VideoCollector.RSSHUB_INSTANCES:
+            rss_url = instance + rss_path
+            resp = SafeRequest.get(rss_url)
+            
+            if resp:
+                videos = VideoCollector.parse_rss(resp.text, account)
+                if videos:
+                    break
+            
+            time.sleep(2)
         
         return videos
     
     @staticmethod
-    def collect_weibo_hot():
-        """
-        采集微博热搜中的房产话题
-        数据源: https://s.weibo.com/top/summary
-        状态: 公开页面,无反爬,100%可用
-        """
+    def parse_rss(rss_content, account):
+        """解析RSS内容"""
         videos = []
         
         try:
-            resp = SafeRequest.get("https://s.weibo.com/top/summary")
-            if not resp:
-                return videos
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(rss_content)
             
-            text = resp.text
-            import re
-            pattern = r'<td class="td-02">.*?<a href="([^"]+)"[^>]*>(.*?)</a>'
-            matches = re.findall(pattern, text, re.DOTALL)
-            
-            keywords = ["房", "楼", "地产", "楼盘", "房价", "买房", "卖房", "租房"]
-            
-            for url, title in matches[:30]:
-                title = re.sub(r'<[^>]+>', '', title).strip()
-                if any(kw in title for kw in keywords):
-                    video_id = hashlib.md5(("weibo" + url + title).encode()).hexdigest()[:16]
-                    videos.append({
-                        "id": video_id,
-                        "platform": "微博热搜",
-                        "author": "热搜",
-                        "title": title[:100],
-                        "url": "https://s.weibo.com" + url if not url.startswith("http") else url,
-                        "likes": "热搜",
-                        "collected_at": datetime.datetime.now().isoformat(),
-                    })
+            for item in root.findall('.//item'):
+                title = item.find('title')
+                link = item.find('link')
+                pub_date = item.find('pubDate')
+                description = item.find('description')
+                
+                title_text = title.text if title is not None else ""
+                link_text = link.text if link is not None else ""
+                
+                # 过滤房产相关内容
+                keywords = ["房", "楼", "地产", "楼盘", "房价", "买房", "卖房", "租房", "楼市"]
+                if not any(kw in title_text for kw in keywords):
+                    continue
+                
+                video_id = hashlib.md5((account["platform"] + link_text + title_text).encode()).hexdigest()[:16]
+                
+                # 提取互动数据（如果有）
+                likes = 0
+                comments = 0
+                if description is not None and description.text:
+                    # 尝试从描述中提取点赞/评论数
+                    like_match = re.search(r'点赞[:：]s*(d+)', description.text)
+                    comment_match = re.search(r'评论[:：]s*(d+)', description.text)
+                    if like_match:
+                        likes = int(like_match.group(1))
+                    if comment_match:
+                        comments = int(comment_match.group(1))
+                
+                videos.append({
+                    "id": video_id,
+                    "platform": account["platform"],
+                    "author": account["name"],
+                    "title": title_text[:200],
+                    "url": link_text,
+                    "likes": likes,
+                    "comments": comments,
+                    "plays": 0,
+                    "publish_time": pub_date.text if pub_date is not None else datetime.datetime.now().isoformat(),
+                    "collected_at": datetime.datetime.now().isoformat(),
+                })
         
         except Exception as e:
-            log("ERROR", f"微博热搜采集失败: {e}")
+            log("ERROR", f"RSS解析失败 [{account['name']}]: {e}")
         
         return videos
 
-# ============ 政策采集 - 100%安全数据源 ============
+# ============ 政策采集 ============
 class PolicyCollector:
-    """
-    使用经过验证的100%可用政策数据源
-    数据源1: 中国政府网政策库 (官方)
-    数据源2: 住建部官网公告 (官方)
-    """
+    """平台政策公告采集器"""
     
     @staticmethod
     def collect_all():
         all_policies = []
-        
-        # 数据源1: 中国政府网
-        log("INFO", "[政策源1] 采集中国政府网房产政策...")
-        policies = PolicyCollector.collect_gov_cn()
-        all_policies.extend(policies)
-        log("INFO", f"中国政府网: {len(policies)} 条")
-        
-        # 数据源2: 住建部
-        log("INFO", "[政策源2] 采集住建部公告...")
-        policies = PolicyCollector.collect_mohurd()
-        all_policies.extend(policies)
-        log("INFO", f"住建部: {len(policies)} 条")
-        
+        for source in CONFIG["policy_sources"]:
+            log("INFO", f"采集政策: {source['name']}...")
+            policies = PolicyCollector.collect_from_page(source["name"], source["url"])
+            all_policies.extend(policies)
+            log("INFO", f"{source['name']}: {len(policies)} 条")
+            time.sleep(3)
         return all_policies
     
     @staticmethod
-    def collect_gov_cn():
-        """
-        采集中国政府网房产相关政策
-        数据源: http://www.gov.cn/zhengce/zhengceku/
-        状态: 官方网站,100%稳定,无风控
-        """
-        policies = []
+    def collect_from_page(source_name, url):
+        resp = SafeRequest.get(url)
+        if not resp:
+            return []
         
+        policies = []
         try:
-            search_url = "http://sousuo.gov.cn/list.htm?q=房产&n=20&t=zhengce"
-            resp = SafeRequest.get(search_url)
-            if not resp:
-                return policies
-            
-            text = resp.text
             import re
+            text = resp.text.lower()
+            keywords = ["房产", "地产", "房屋", "楼市", "直播", "账号", "规范", "治理", "公告", "政策"]
             
-            pattern = r'<a href="([^"]+)"[^>]*>(.*?)</a>'
-            matches = re.findall(pattern, text)
-            
-            for url, title in matches[:15]:
-                title = re.sub(r'<[^>]+>', '', title).strip()
-                if len(title) < 5 or "房产" not in title and "房地产" not in title and "住房" not in title:
+            lines = text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if len(line) < 10 or len(line) > 300:
                     continue
                 
-                if not url.startswith("http"):
-                    url = "http://www.gov.cn" + url
-                
-                policy_id = hashlib.md5(("gov" + url + title).encode()).hexdigest()[:16]
-                policies.append({
-                    "id": policy_id,
-                    "source": "中国政府网",
-                    "title": title[:200],
-                    "url": url,
-                    "collected_at": datetime.datetime.now().isoformat(),
-                })
+                if any(kw in line for kw in keywords):
+                    policy_id = hashlib.md5((source_name + line).encode()).hexdigest()[:16]
+                    policies.append({
+                        "id": policy_id,
+                        "source": source_name,
+                        "title": line[:200],
+                        "url": url,
+                        "summary": line[:300],
+                        "collected_at": datetime.datetime.now().isoformat(),
+                    })
+            
+            seen = set()
+            unique = []
+            for p in policies:
+                if p["id"] not in seen:
+                    seen.add(p["id"])
+                    unique.append(p)
+            
+            return unique[:10]
         
         except Exception as e:
-            log("ERROR", f"中国政府网采集失败: {e}")
-        
-        return policies
-    
-    @staticmethod
-    def collect_mohurd():
-        """
-        采集住建部公告
-        数据源: https://www.mohurd.gov.cn/
-        状态: 官方网站,100%稳定,无风控
-        """
-        policies = []
-        
-        try:
-            resp = SafeRequest.get("https://www.mohurd.gov.cn/")
-            if not resp:
-                return policies
-            
-            text = resp.text
-            import re
-            
-            pattern = r'<a href="([^"]+)"[^>]*>(.*?)</a>'
-            matches = re.findall(pattern, text)
-            
-            keywords = ["房", "地产", "楼盘", "住房", "租赁", "公积金"]
-            
-            for url, title in matches[:15]:
-                title = re.sub(r'<[^>]+>', '', title).strip()
-                if len(title) < 5:
-                    continue
-                
-                if not any(kw in title for kw in keywords):
-                    continue
-                
-                if not url.startswith("http"):
-                    url = "https://www.mohurd.gov.cn" + url
-                
-                policy_id = hashlib.md5(("mohurd" + url + title).encode()).hexdigest()[:16]
-                policies.append({
-                    "id": policy_id,
-                    "source": "住建部",
-                    "title": title[:200],
-                    "url": url,
-                    "collected_at": datetime.datetime.now().isoformat(),
-                })
-        
-        except Exception as e:
-            log("ERROR", f"住建部采集失败: {e}")
-        
-        return policies
+            log("ERROR", f"政策采集失败 [{source_name}]: {e}")
+            return []
 
 # ============ 数据存储 ============
 class DataStore:
@@ -400,11 +378,20 @@ class DataStore:
         added = 0
         
         for v in videos:
+            is_quality = 1 if (v.get("likes", 0) >= CONFIG["quality_threshold"]["min_likes"] or
+                              v.get("comments", 0) >= CONFIG["quality_threshold"]["min_comments"]) else 0
+            
             try:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO videos (id, platform, author, title, url, likes, collected_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (v["id"], v["platform"], v["author"], v["title"], v["url"], v["likes"], v["collected_at"]))
+                    INSERT OR IGNORE INTO videos 
+                    (id, platform, author, title, url, likes, comments, plays, publish_time, collected_at, is_quality)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    v["id"], v.get("platform", ""), v.get("author", ""),
+                    v["title"], v["url"], v.get("likes", 0),
+                    v.get("comments", 0), v.get("plays", 0),
+                    v.get("publish_time", ""), datetime.datetime.now().isoformat(), is_quality
+                ))
                 if cursor.rowcount > 0:
                     added += 1
             except Exception as e:
@@ -426,9 +413,10 @@ class DataStore:
         for p in policies:
             try:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO policies (id, source, title, url, collected_at)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (p["id"], p["source"], p["title"], p["url"], p["collected_at"]))
+                    INSERT OR IGNORE INTO policies 
+                    (id, source, title, url, summary, collected_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (p["id"], p["source"], p["title"], p["url"], p["summary"], p["collected_at"]))
                 if cursor.rowcount > 0:
                     added += 1
             except Exception as e:
@@ -445,16 +433,20 @@ class DataStore:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT platform, author, title, url, likes
-            FROM videos WHERE collected_at LIKE ?
-            ORDER BY collected_at DESC LIMIT 15
+            SELECT platform, author, title, url, likes, comments, plays 
+            FROM videos 
+            WHERE collected_at LIKE ?
+            ORDER BY likes DESC
+            LIMIT 15
         ''', (f"{today}%",))
         videos = cursor.fetchall()
         
         cursor.execute('''
-            SELECT source, title, url
-            FROM policies WHERE collected_at LIKE ?
-            ORDER BY collected_at DESC LIMIT 10
+            SELECT source, title, url, summary 
+            FROM policies 
+            WHERE collected_at LIKE ?
+            ORDER BY collected_at DESC
+            LIMIT 10
         ''', (f"{today}%",))
         policies = cursor.fetchall()
         
@@ -519,20 +511,24 @@ class PushNotifier:
         
         lines = [f"# 房产监控日报 ({today})\n"]
         
-        lines.append("## 今日房产热点\n")
+        lines.append("## 今日优质房产短视频\n")
         if videos:
             for v in videos[:10]:
-                platform, author, title, url, likes = v
-                lines.append(f"**[{platform}]** {title}")
-                lines.append(f"[查看详情]({url})")
+                platform, author, title, url, likes, comments, plays = v
+                quality_mark = "🔥" if likes >= CONFIG["quality_threshold"]["min_likes"] else ""
+                lines.append(f"{quality_mark} **[{platform}]** {author}")
+                lines.append(f"   {title}")
+                lines.append(f"   [点击观看]({url})")
+                if likes > 0 or comments > 0:
+                    lines.append(f"   👍{likes} 💬{comments}")
                 lines.append("")
         else:
-            lines.append("> 今日暂无新内容\n")
+            lines.append("> 今日暂无新视频\n")
         
-        lines.append("## 政策动态\n")
+        lines.append("## 平台政策动态\n")
         if policies:
             for p in policies[:8]:
-                source, title, url = p
+                source, title, url, summary = p
                 lines.append(f"**[{source}]** {title}")
                 lines.append(f"[查看详情]({url})")
                 lines.append("")
@@ -547,10 +543,9 @@ class PushNotifier:
 
 # ============ 主程序 ============
 def main():
-    """主入口"""
     start_time = datetime.datetime.now()
     log("INFO", "=" * 40)
-    log("INFO", "房产监控日报系统启动(云端版)")
+    log("INFO", "房产监控日报系统启动(大V版)")
     log("INFO", f"开始时间: {start_time.isoformat()}")
     log("INFO", "=" * 40)
     
@@ -579,10 +574,4 @@ def main():
     log("INFO", "=" * 40)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[FATAL] 程序异常: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    main()
